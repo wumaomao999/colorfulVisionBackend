@@ -50,9 +50,11 @@ class VisionAnalyzer:
         self._face_module = solutions.face_detection
         # 分析器在所有请求之间复用，避免每次请求都重复初始化模型。
         self._hands = self._hands_module.Hands(
-            static_image_mode=True,
+            static_image_mode=False,
             max_num_hands=2,
-            min_detection_confidence=0.5,
+            min_detection_confidence=0.5,  # 降低检测阈值，提高速度
+            min_tracking_confidence=0.5,  # 降低跟踪阈值
+            model_complexity=1,  # 平衡速度和精度
         )
         self._face = self._face_module.FaceDetection(min_detection_confidence=0.5)
         # MediaPipe 对象不保证线程安全，因此推理过程统一加锁。
@@ -75,7 +77,7 @@ class VisionAnalyzer:
         return direction, face_distance
 
     @staticmethod
-    def _resize_for_inference(img: np.ndarray, max_side: int = 960) -> np.ndarray:
+    def _resize_for_inference(img: np.ndarray, max_side: int = 480) -> np.ndarray:
         # 手机原图通常偏大，直接推理会增加延迟，这里先缩放到合适尺寸。
         height, width = img.shape[:2]
         longest_side = max(height, width)
