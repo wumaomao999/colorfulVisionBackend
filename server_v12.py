@@ -47,18 +47,28 @@ class VisionAnalyzer:
     def __init__(self):
         solutions = get_mediapipe_solutions()
         self._hands_module = solutions.hands
-        self._face_module = solutions.face_detection
+        # 使用 Face Mesh 替代 Face Detection
+        self._face_mesh_module = solutions.face_mesh
         # 分析器在所有请求之间复用，避免每次请求都重复初始化模型。
         self._hands = self._hands_module.Hands(
             static_image_mode=False,
             max_num_hands=2,
-            min_detection_confidence=0.5,  # 降低检测阈值，提高速度
-            min_tracking_confidence=0.5,  # 降低跟踪阈值
-            model_complexity=1,  # 平衡速度和精度
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+            model_complexity=1,
         )
-        self._face = self._face_module.FaceDetection(min_detection_confidence=0.5)
+        # 初始化 Face Mesh，启用平滑 landmark 以提高稳定性
+        self._face_mesh = self._face_mesh_module.FaceMesh(
+            static_image_mode=False,
+            max_num_faces=1,
+            refine_landmarks=True,          # 关键：提供更精确的眼睑轮廓点
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
         # MediaPipe 对象不保证线程安全，因此推理过程统一加锁。
         self._lock = threading.Lock()
+
+
 
     def analyze(self, img: np.ndarray, preferred_hand: int) -> tuple[str, float]:
         if img is None or img.size == 0:
@@ -70,10 +80,11 @@ class VisionAnalyzer:
 
         with self._lock:
             hand_results = self._hands.process(rgb_img)
-            face_results = self._face.process(rgb_img)
+            # 同时执行 Face Mesh 推理
+            face_mesh_results = self._face_mesh.process(rgb_img)
 
         direction = self._detect_direction(hand_results, preferred_hand)
-        face_distance = self._estimate_distance(face_results, width)
+        face_distance = self._estimate_distance_precise(face_mesh_results, width, height)
         return direction, face_distance
 
     @staticmethod
@@ -133,17 +144,35 @@ class VisionAnalyzer:
             return "Left" if dx < 0 else "Right"
         return "Up" if dy < 0 else "Down"
 
-    def _estimate_distance(self, face_results, image_width: int) -> float:
-        if not face_results.detections:
+    def _estimate_distance_precise(self, face_mesh_results, image_width: int, image_height: int) -> float:
+        """
+        基于 Face Mesh 的眼角关键点计算距离（米）
+        使用左眼外眼角 (landmark 33) 和右眼外眼角 (landmark 263)
+        """
+        if not face_mesh_results.multi_face_landmarks:
             return 0.0
 
-        # 根据人脸相对宽度做一个粗略距离估计。
-        # 这里不是精确测距，只用于检测开始前的距离门槛判断。
-        bbox = face_results.detections[0].location_data.relative_bounding_box
-        face_width = bbox.width * image_width
-        if face_width <= 0:
+        landmarks = face_mesh_results.multi_face_landmarks[0].landmark
+
+        # 左眼外眼角 (index 33) 和 右眼外眼角 (index 263)
+        left_eye_outer = (landmarks[33].x, landmarks[33].y)
+        right_eye_outer = (landmarks[263].x, landmarks[263].y)
+
+        # 计算图像中的像素距离（欧几里得距离）
+        dx = (left_eye_outer[0] - right_eye_outer[0]) * image_width
+        dy = (left_eye_outer[1] - right_eye_outer[1]) * image_height
+        eye_pixel_distance = (dx ** 2 + dy ** 2) ** 0.5
+
+        if eye_pixel_distance < 1e-6:
             return 0.0
-        return round((800 * 0.15) / face_width, 2)
+
+        # 真实外眼角间距（米），成年人平均值约 0.10 米（10 厘米）
+        real_eye_distance_m = 0.10
+        # 焦距（像素），此处沿用经验值 800（可根据实际标定调整）
+        focal_length = 800
+
+        distance = (real_eye_distance_m * focal_length) / eye_pixel_distance
+        return round(distance, 2)
 
 
 app = Flask(__name__)
